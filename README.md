@@ -55,7 +55,7 @@ This repo contains a **purely vibe-coded** single PowerShell script that install
 3. Run:
 
    ```powershell
-   pwsh -ExecutionPolicy Bypass -File .\Install-SageAttention.ps1 -CreateBatRunner
+   .\Install-SageAttention.ps1 -CreateBatRunner
    ```
 4. After success, launch ComfyUI with SageAttention:
 
