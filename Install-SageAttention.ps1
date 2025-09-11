@@ -1,19 +1,19 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-  Triton & SageAttention Installer for ComfyUI (PowerShell 7.x) – no local wheels, auto Torch, README→JSON, and Triton Python dev files.
+  Triton & SageAttention Installer for ComfyUI (PowerShell 7.x) – uses wheels.json (no scraping), auto Torch, JSON-based resolver, and Triton Python dev files.
 
 .DESCRIPTION
   - Preflight (with timeouts): Python/CP tag, Torch, CUDA (nvcc/nvidia-smi), GPU.
   - Torch auto-install: if Torch is missing → install automatically (prefer CUDA; CPU fallback).
   - Optional Torch-first (force via -TorchVersion/-CudaTag).
-  - SageAttention 2.2 (SageAttention2++) & 2.1.1 directly from wildminder/AI-windows-whl (README parsing → JSON).
+  - SageAttention 2.2 (SageAttention2++) & 2.1.1 via wildminder/AI-windows-whl (from wheels.json only).
   - CUDA minor fallback: 12.9→12.8.
-  - ABI3 fallback (cp39-abi3) optional.
+  - ABI3 fallback optional (py3/abi3).
   - Triton prerequisite for Python 3.13: auto-download and place only "include" and "libs" into python_embeded (never touch "Lib").
   - Clean, readable console output by default; detailed timings only with -DebugLog / -TraceScript.
   - Retries (pip/web), transcript logging, post-install checks.
-  - Saves the extracted README table structure as JSON in the script folder.
+  - Saves fetched wheels.json to disk (skipped in DryRun).
 
 .NOTES
   Run from the ComfyUI portable root folder (contains: .\ComfyUI, .\python_embeded, .\update …).
@@ -46,7 +46,7 @@ param(
   [switch] $CreatePsRunner,
   [switch] $CreateBatRunner = $true,
 
-  # --- Auto-Fetch from wildminder/AI-windows-whl ---
+  # --- Auto-Fetch from AI-windows-whl (JSON index only) ---
   [switch] $AutoFetchFromAIWheels,
 
   # --- Optional extras ---
@@ -58,7 +58,11 @@ param(
   # --- Triton Python dev headers/libs (for Python 3.13 portable) ---
   [string] $TritonPyDevZipUrl = "https://github.com/woct0rdho/triton-windows/releases/download/v3.0.0-windows.post1/python_3.13.2_include_libs.zip",
   [switch] $SkipTritonPyDev,
-  [switch] $ForceTritonPyDev
+  [switch] $ForceTritonPyDev,
+
+  # --- wheels.json endpoint ---
+  [string] $WheelsJsonUrl = "https://raw.githubusercontent.com/wildminder/AI-windows-whl/refs/heads/main/wheels.json",
+  [string] $WheelsJsonOut = ".\aiwheels_index.json"
 )
 
 Set-StrictMode -Version Latest
@@ -119,12 +123,13 @@ function Exec-Capture {
     [Parameter(Mandatory)][string] $FilePath,
     [Parameter()][string[]] $ArgumentList = @(),
     [int] $TimeoutSec = 60,
-    [string] $Tag = ""
+    [string] $Tag = "",
+    [switch] $AllowInDryRun  # erlaubt echte Ausführung im DryRun (z.B. Python-Imports)
   )
   $exe = Resolve-ExecutablePath $FilePath
   $displayArgs = Join-Args $ArgumentList
 
-  if ($DryRun) {
+  if ($DryRun -and -not $AllowInDryRun) {
     Write-Info ("DRY-RUN: {0} {1}" -f $exe, $displayArgs)
     return [pscustomobject]@{ ExitCode=0; StdOut=""; StdErr="" }
   }
@@ -218,7 +223,7 @@ function Pip-FreezeToFile([string]$Path) {
 
 function Py-Run([string]$Code, [int]$TimeoutSec = $CommandTimeoutSec, [string]$Tag = "py") {
   $py = Get-PyExe
-  Exec-Capture -FilePath $py -ArgumentList @('-c', $Code) -TimeoutSec $TimeoutSec -Tag $Tag
+  Exec-Capture -FilePath $py -ArgumentList @('-c', $Code) -TimeoutSec $TimeoutSec -Tag $Tag -AllowInDryRun
 }
 
 # --------------------- Preflight / Info --------------------------------------
@@ -264,10 +269,13 @@ function Get-NvccVersion {
 }
 function Get-NvidiaSmi {
   try {
-    $res = Exec-Capture -FilePath "nvidia-smi" -ArgumentList @("--query-gpu=name,driver_version","--format=csv,noheader") -TimeoutSec $CommandTimeoutSec -Tag "nvidia-smi"
+    $res = Exec-Capture -FilePath "nvidia-smi" `
+      -ArgumentList @("--query-gpu=name,driver_version","--format=csv,noheader") `
+      -TimeoutSec $CommandTimeoutSec -Tag "nvidia-smi" -AllowInDryRun
     return $res.StdOut
   } catch { return $null }
 }
+
 
 # --------------------- Utilities ---------------------------------------------
 
@@ -370,6 +378,194 @@ function Ensure-TritonPythonDev {
   }
 }
 
+# --------------------- wheels.json fetching & resolver ------------------------
+
+function Save-Text([string]$Path, [string]$Text) {
+  if ($DryRun) { if ($DebugLog) { Write-Info ("DRY-RUN: save {0}" -f $Path) } ; return }
+  Set-Content -LiteralPath $Path -Value $Text -Encoding UTF8
+}
+
+function Get-WheelsIndex {
+  Write-Section "Fetch wheels.json"
+  Write-Info ("URL: {0}" -f $WheelsJsonUrl)
+
+  $raw = (Invoke-WebRequest -Uri $WheelsJsonUrl -TimeoutSec $WebTimeoutSec).Content
+  if (-not $raw) { throw "wheels.json download returned empty content." }
+
+  if ($DryRun) {
+    Write-Info "DRY-RUN: skipping save of wheels.json"
+  } else {
+    Save-Text -Path $WheelsJsonOut -Text $raw
+    Write-Ok ("Saved wheels.json → {0}" -f $WheelsJsonOut)
+  }
+
+  try {
+    $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+    if (-not $obj.packages) { throw "JSON has no 'packages' array." }
+    return $obj
+  } catch {
+    throw "Failed to parse wheels.json: $($_.Exception.Message)"
+  }
+}
+
+function Normalize-Name([string]$s) {
+  if ($null -eq $s) { return "" }
+  ($s -replace '[\s_\-]','' -replace '\+','plus').ToLowerInvariant()
+}
+
+function Get-Prop($obj, [string[]]$names) {
+  foreach ($n in $names) {
+    $p = $obj.PSObject.Properties[$n]
+    if ($p) { return $p.Value }
+  }
+  return $null
+}
+
+function Version-MM([string]$ver) {
+  if ([string]::IsNullOrWhiteSpace($ver)) { return $null }
+  $m = [regex]::Match($ver, '^\s*(\d+)\.(\d+)')
+  if ($m.Success) { return ("{0}.{1}" -f $m.Groups[1].Value, $m.Groups[2].Value) }
+  return $null
+}
+
+function Python-Match($wheelPy, [string]$wantMM, [switch]$AllowAbi3) {
+  if (-not $wheelPy) { return $true } # permissive if absent
+  $s = [string]$wheelPy
+
+  # exact like "3.12"
+  if ($s -match '^\s*\d+\.\d+\s*$') { return ($s -eq $wantMM) }
+
+  # ranges like ">=3.9", ">3.9", "3.9+"
+  if ($s -match '>=\s*(\d+\.\d+)') { return ([version]$wantMM -ge [version]$Matches[1]) }
+  if ($s -match '>\s*(\d+\.\d+)')  { return ([version]$wantMM -gt [version]$Matches[1]) }
+  if ($s -match '(\d+\.\d+)\s*\+') { return ([version]$wantMM -ge [version]$Matches[1]) }
+
+  # generic markers
+  if ($s -match '(?i)\babi3\b' -or $s -match '(?i)\bpy3\b' -or $s -match '(?i)\bcp39\+?\b') {
+    return [bool]$AllowAbi3
+  }
+  return $false
+}
+
+function Torch-Match($wheelTorch, [string]$wantFull) {
+  if (-not $wheelTorch) { return $true } # permissive if absent
+  $mmWant = Version-MM $wantFull
+  $mmHave = Version-MM ([string]$wheelTorch)
+  if ($wheelTorch -eq $wantFull) { return $true }
+  if ($mmHave -and $mmWant -and ($mmHave -eq $mmWant)) { return $true }
+  return $false
+}
+
+function Cuda-Match([string]$wheelCuda, [string]$wantPretty) {
+  if (-not $wheelCuda) { return $true } # permissive if absent
+  $s = ($wheelCuda -replace '[^\d\.]','').Trim()
+  if ($s -eq $wantPretty) { return $true }
+  return $false
+}
+
+function Resolve-AIWheelsUrl {
+  param(
+    [Parameter(Mandatory)] $IndexObj,
+    [Parameter(Mandatory)][string] $PackageName,    # e.g., "SageAttention", "Flash Attention"
+    [Parameter(Mandatory)][string] $TorchVer,       # e.g., 2.8.0
+    [Parameter(Mandatory)][string] $CudaTag,        # e.g., cu128
+    [Parameter(Mandatory)][string] $PythonMM,       # e.g., 3.12
+    [switch] $SageAttentionV22Only,
+    [switch] $AllowAbi3Fallback
+  )
+
+  $wantCudaPretty = Convert-CuToCuda $CudaTag
+  $normWant = Normalize-Name $PackageName
+
+  # Find package(s)
+  $pkgs = @()
+  foreach ($p in @($IndexObj.packages)) {
+    $pname = [string](Get-Prop $p @('name','title','id','slug'))
+    if (-not $pname) { continue }
+    $normHave = Normalize-Name $pname
+    if ($normHave -eq $normWant) { $pkgs += ,$p; continue }
+    if ($normHave -match [regex]::Escape($normWant) -or $normWant -match [regex]::Escape($normHave)) { $pkgs += ,$p }
+  }
+  if ($pkgs.Count -eq 0) { throw "Package '$PackageName' not found in wheels.json." }
+
+  # Collect all candidate wheels
+  $cands = @()
+  foreach ($pkg in $pkgs) {
+    foreach ($w in @($pkg.wheels)) {
+      # optional filter: SageAttention 2.2 only
+      if ($SageAttentionV22Only) {
+        $pv = [string](Get-Prop $w @('package_version','version','pkg_version'))
+        $note = [string](Get-Prop $w @('variant','note','notes'))
+        $pvOk = ($pv -match '^\s*2\.2') -or ($note -match '2\.2') -or ($note -match 'SageAttention2')
+        if (-not $pvOk) { continue }
+      }
+
+      $wTorch  = [string](Get-Prop $w @('torch','pytorch','pytorch_version','torch_version'))
+      $wPy     = [string](Get-Prop $w @('python','python_version','py'))
+      $wCuda   = [string](Get-Prop $w @('cuda','cuda_version','cu'))
+      $wUrl    = [string](Get-Prop $w @('url','href','download'))
+      $wCxxAbi = [string](Get-Prop $w @('cxx11abi','abi','abi3'))
+
+      if (-not $wUrl) { continue }
+
+      $okTorch = Torch-Match $wTorch $TorchVer
+      $okPy    = Python-Match $wPy $PythonMM -AllowAbi3:$AllowAbi3Fallback
+      $okCuda  = Cuda-Match $wCuda $wantCudaPretty
+
+      if ($okTorch -and $okPy -and $okCuda) {
+        $score = 0
+        if ($wTorch -eq $TorchVer) { $score += 3 } elseif (Version-MM $wTorch -eq Version-MM $TorchVer) { $score += 2 }
+        if ($wCuda -match [regex]::Escape($wantCudaPretty)) { $score += 2 }
+        if ($wPy -match [regex]::Escape($PythonMM)) { $score += 1 }
+        if ($wCxxAbi -match '(?i)TRUE') { $score += 1 }
+        $cands += ,([pscustomobject]@{ url=$wUrl; score=$score; torch=$wTorch; py=$wPy; cuda=$wCuda })
+      }
+    }
+  }
+
+  if ($cands.Count -eq 0 -and $wantCudaPretty -eq '12.9') {
+    # CUDA minor fallback: try 12.8
+    return Resolve-AIWheelsUrl -IndexObj $IndexObj -PackageName $PackageName -TorchVer $TorchVer -CudaTag 'cu128' -PythonMM $PythonMM -SageAttentionV22Only:$SageAttentionV22Only -AllowAbi3Fallback:$AllowAbi3Fallback
+  }
+
+  if ($cands.Count -eq 0 -and $AllowAbi3Fallback -eq $false) {
+    # Retry with ABI3 fallback enabled
+    return Resolve-AIWheelsUrl -IndexObj $IndexObj -PackageName $PackageName -TorchVer $TorchVer -CudaTag $CudaTag -PythonMM $PythonMM -SageAttentionV22Only:$SageAttentionV22Only -AllowAbi3Fallback
+  }
+
+  if ($cands.Count -eq 0) {
+    throw "No matching wheel for $PackageName (Torch $TorchVer, CUDA $CudaTag, Python $PythonMM)."
+  }
+
+  $best = $cands | Sort-Object -Property score -Descending | Select-Object -First 1
+  return $best.url
+}
+
+function Install-AIWheel-FromIndex {
+  param(
+    [Parameter(Mandatory)][string] $Package,      # "SageAttention" / "Flash Attention" / …
+    [Parameter(Mandatory)][string] $TorchVer,
+    [Parameter(Mandatory)][string] $CudaTag,
+    [Parameter(Mandatory)][string] $PythonMM,
+    [switch] $SageAttentionV22Only,
+    [switch] $AllowAbi3Fallback
+  )
+
+  Write-Section ("{0}" -f $Package)
+  Write-Info ("Selecting a compatible wheel (Torch {0}, CUDA {1}, Python {2}) …" -f $TorchVer, $CudaTag, $PythonMM)
+
+  $index = Get-WheelsIndex
+  $url = Resolve-AIWheelsUrl -IndexObj $index -PackageName $Package -TorchVer $TorchVer -CudaTag $CudaTag -PythonMM $PythonMM -SageAttentionV22Only:$SageAttentionV22Only -AllowAbi3Fallback:$AllowAbi3Fallback
+
+  $wheelName = Split-Path -Leaf $url
+  Write-Ok ("Wheel selected: {0}" -f $wheelName)
+  if ($DebugLog) { Write-Info ("Source: {0}" -f $url) }
+
+  Write-Info ("Installing {0} …" -f $Package)
+  Pip @('install', $url)
+  Write-Ok ("{0} installed." -f $Package)
+}
+
 # --------------------- Install / Uninstall -----------------------------------
 
 function Install-Triton {
@@ -409,12 +605,7 @@ function Uninstall-Sage  {
   else { Write-Info "Skipping uninstall (SageAttention)" }
 }
 
-function Install-WheelFromUrl([string] $Url) {
-  # Silent installer (caller prints friendly info)
-  Pip @('install', $Url)
-}
-
-# --- Torch Auto-Install -------------------------------------------------------
+# --------------------- Torch Auto --------------------------------------------
 
 function Test-HasGPU { return [bool](Get-NvidiaSmi) }
 
@@ -457,289 +648,6 @@ function Install-TorchAuto([string] $PreferredCudaTag) {
   finally {
     $script:PipExtraIndexUrl = $savedExtra
   }
-}
-
-# --------------------- README → JSON (parse all tables with headers) ----------
-
-function Get-AIWindowsWhlReadme {
-  $url = "https://raw.githubusercontent.com/wildminder/AI-windows-whl/main/README.md"
-  if ($DryRun) { if ($DebugLog) { Write-Info ("DRY-RUN: GET {0}" -f $url) }; return "" }
-  if ($DebugLog) { Step-Begin "Download README.md (AI-windows-whl)" }
-  try {
-    (Invoke-WebRequest -Uri $url -TimeoutSec $WebTimeoutSec).Content
-  } finally {
-    if ($DebugLog) { Step-End "Download README.md (AI-windows-whl)" }
-  }
-}
-
-function Normalize-HeaderCell([string]$s) {
-  if ($null -eq $s) { return "" }
-  $t = $s.Trim()
-  $t = $t.Trim('|')
-  $t = $t -replace '^\*+','' -replace '\*+$',''
-  $t = $t -replace '^`+','' -replace '`+$',''
-  $t
-}
-
-function Split-PipeRow([string]$row) {
-  $parts = @()
-  $acc = ""
-  $chars = $row.ToCharArray()
-  for ($i=0; $i -lt $chars.Length; $i++) {
-    $ch = $chars[$i]
-    if ($ch -eq '|') { $parts += ,$acc; $acc = "" }
-    else { $acc += $ch }
-  }
-  $parts += ,$acc
-  ($parts | ForEach-Object { $_.Trim() }) | Where-Object { $_ -ne "" }
-}
-
-function Try-ParsePipeTable([string[]]$lines) {
-  if ($null -eq $lines -or $lines.Length -lt 2) { return $null }
-  $header = Split-PipeRow $lines[0]
-  if ($header.Length -lt 2) { return $null }
-  $startIdx = 1
-  if ($lines.Length -ge 2 -and ($lines[1] -replace '\s','') -match '^\|?:?-{3,}') { $startIdx = 2 }
-  $hdr = @(); foreach ($h in $header) { $hdr += ,(Normalize-HeaderCell $h) }
-  if ($hdr.Length -lt 2) { return $null }
-
-  $rows = @()
-  for ($i=$startIdx; $i -lt $lines.Length; $i++) {
-    $ln = $lines[$i]
-    if (-not ($ln.TrimStart().StartsWith('|'))) { break }
-    if (($ln -replace '\s','') -match '^\|?:?-{3,}') { continue }
-    $cells = Split-PipeRow $ln
-    if ($cells.Length -lt $hdr.Length) {
-      $pad = @(); for ($k=$cells.Length; $k -lt $hdr.Length; $k++) { $pad += ,'' }
-      $cells = @($cells + $pad)
-    }
-    if ($cells.Length -gt $hdr.Length) { $cells = $cells[0..($hdr.Length-1)] }
-    $obj = [ordered]@{}
-    for ($c=0; $c -lt $hdr.Length; $c++) { $obj[$hdr[$c]] = $cells[$c] }
-    $rows += ,[pscustomobject]$obj
-  }
-  if ($rows.Length -eq 0) { return $null }
-  [pscustomobject]@{ header = $hdr; rows = $rows }
-}
-
-function Parse-Readme-ToTablesJson {
-  param([Parameter(Mandatory)][string] $Markdown)
-
-  $lines = $Markdown -split "\r?\n"
-  $tables = New-Object System.Collections.Generic.List[object]
-  $currentSection = $null
-  $currentSub = $null
-  $buffer = @()
-  $collecting = $false
-  $indexByKey = @{}
-
-  function Flush-Buffer {
-    param([string]$section, [string]$subsection)
-    if (-not $collecting) { return }
-    $collect = @($buffer); $buffer = @(); $script:collecting = $false
-
-    $chunks = @(); $cur = @()
-    foreach ($ln in $collect) {
-      if ($ln.Trim().StartsWith('|')) { $cur += ,$ln }
-      else { if ($cur.Length -ge 2) { $chunks += ,@($cur); $cur = @() } }
-    }
-    if ($cur.Length -ge 2) { $chunks += ,@($cur) }
-
-    $idx = if ($indexByKey.ContainsKey("$section|$subsection")) { $indexByKey["$section|$subsection"] } else { 0 }
-    foreach ($ch in $chunks) {
-      $parsed = Try-ParsePipeTable -lines $ch
-      if ($parsed -ne $null) {
-        $tables.Add([pscustomobject]@{
-          section    = $section
-          subsection = $subsection
-          index      = $idx
-          header     = $parsed.header
-          rows       = $parsed.rows
-        }) | Out-Null
-        $idx++
-      }
-    }
-    $indexByKey["$section|$subsection"] = $idx
-  }
-
-  foreach ($ln in $lines) {
-    if ($ln -match '^\s*###\s+(.+)$') {
-      Flush-Buffer -section $currentSection -subsection $currentSub
-      $currentSection = $Matches[1].Trim(); $currentSub = $null; $collecting = $false; $buffer = @(); continue
-    }
-    if ($ln -match '^\s*####\s+(.+)$') {
-      Flush-Buffer -section $currentSection -subsection $currentSub
-      $currentSub = $Matches[1].Trim(); $collecting = $false; $buffer = @(); continue
-    }
-    $isPipe = $ln.TrimStart().StartsWith('|')
-    if ($isPipe) { $collecting = $true; $buffer += ,$ln; continue }
-    else { if ($collecting) { Flush-Buffer -section $currentSection -subsection $currentSub; $buffer = @(); $collecting = $false } }
-  }
-  Flush-Buffer -section $currentSection -subsection $currentSub
-
-  $obj = [ordered]@{ tables = @($tables.ToArray()) }
-  $json = ($obj | ConvertTo-Json -Depth 8)
-  return $json, $obj
-}
-
-function Save-JsonToScriptDir([string]$JsonText, [string]$FileName = "aiwheels_tables.json") {
-  $dest = Join-Path (Get-Location) $FileName
-  if (-not $DryRun) { Set-Content -LiteralPath $dest -Value $JsonText -Encoding UTF8 }
-  if ($DebugLog) { Write-Ok ("Saved README→JSON: {0}" -f $dest) }
-  return $dest
-}
-
-# --------------------- Link selection (incl. SageAttention 2.2) --------------
-
-function Extract-LinkUrl([string] $Cell) {
-  if (-not $Cell) { return $null }
-  $m = [regex]::Match($Cell, '\((https?://[^\)]+)\)')
-  if ($m.Success) { return $m.Groups[1].Value }
-  if ($Cell -match '^https?://') { return $Cell }
-  return $null
-}
-
-function Find-ColumnName([string[]] $Names, [string[]] $Patterns) {
-  foreach ($pat in $Patterns) {
-    $m = $Names | Where-Object { $_ -match $pat } | Select-Object -First 1
-    if ($m) { return $m }
-  }
-  return $null
-}
-
-function Get-Cell($row, [string]$name) {
-  if (-not $row) { return $null }
-  $p = $row.PSObject.Properties[$name]
-  if ($p) { return [string]$p.Value }
-  return $null
-}
-
-function Resolve-SageAttentionUrl-FromJson {
-  param(
-    [Parameter(Mandatory)] $JsonObj,
-    [Parameter(Mandatory)][string] $TorchVer,
-    [Parameter(Mandatory)][string] $CudaTag,
-    [Parameter(Mandatory)][string] $PythonMM,
-    [switch] $AllowAbi3Fallback
-  )
-
-  $CudaPretty = Convert-CuToCuda $CudaTag
-  $tables = @($JsonObj.tables)
-  if (-not $tables -or $tables.Count -eq 0) { throw "JSON has no 'tables' – README may not have loaded/parsed." }
-
-  $sa22 = @($tables | Where-Object {
-    $_.section -match '^\s*SageAttention\s*$' -and
-    ($_.subsection -match 'SageAttention\s*2\.2' -or $_.subsection -match 'SageAttention2\+\+')
-  })
-  if ($sa22.Count -eq 0) {
-    $sa22 = @($tables | Where-Object { $_.section -match '^\s*SageAttention\s*$' -and $_.subsection -eq $null -and $_.index -ge 1 })
-  }
-  $saAll = @($tables | Where-Object { $_.section -match '^\s*SageAttention\s*$' })
-
-  function Try-Select {
-    param([object[]]$tableSet, [string]$cudaWanted, [switch]$allowPyMissing)
-    foreach ($tbl in @($tableSet)) {
-      $headers = @($tbl.header)
-      $torchCol = Find-ColumnName $headers @('(?i)pytorch','(?i)\btorch\b')
-      $pyCol    = Find-ColumnName $headers @('(?i)^python','(?i)python\s*ver','(?i)^py\b')
-      $cudaCol  = Find-ColumnName $headers @('(?i)^cuda','(?i)compute','(?i)cu\d')
-      $linkCol  = Find-ColumnName $headers @('(?i)download','(?i)link','(?i)href','(?i)wheel','(?i)\.whl')
-      if (-not $linkCol) { continue }
-      foreach ($r in @($tbl.rows)) {
-        $tv = if ($torchCol){ Get-Cell $r $torchCol } else { $null }
-        $pv = if ($pyCol)  { Get-Cell $r $pyCol } else { $null }
-        $cv = if ($cudaCol){ Get-Cell $r $cudaCol } else { $null }
-
-        $torchMM = ($TorchVer -split '\.')[0..1] -join '\.'
-        $okTorch = (-not $torchCol) -or ($tv -and ($tv -match ("^" + [regex]::Escape($TorchVer) + "(\b|$)") -or $tv -match ("^" + $torchMM)))
-        $okCuda  = (-not $cudaCol) -or ($cv -and ($cv -match [regex]::Escape($cudaWanted)))
-        $okPy    = $allowPyMissing -or (-not $pyCol) -or ($pv -and ($pv -match [regex]::Escape($PythonMM)))
-
-        if ($okTorch -and $okCuda -and $okPy) {
-          $linkCell = Get-Cell $r $linkCol
-          $url = Extract-LinkUrl $linkCell
-          if ($url) { return $url }
-        }
-      }
-    }
-    return $null
-  }
-
-  $url = $null
-  if (-not $url) { $url = Try-Select -tableSet $sa22 -cudaWanted $CudaPretty }
-  if (-not $url -and $CudaPretty -eq '12.9') { $url = Try-Select -tableSet $sa22 -cudaWanted '12.8' }
-  if (-not $url) { $url = Try-Select -tableSet $saAll -cudaWanted $CudaPretty }
-  if (-not $url -and $CudaPretty -eq '12.9') { $url = Try-Select -tableSet $saAll -cudaWanted '12.8' }
-
-  if (-not $url -and $AllowAbi3Fallback) {
-    if (-not $url) { $url = Try-Select -tableSet $sa22 -cudaWanted $CudaPretty -allowPyMissing }
-    if (-not $url -and $CudaPretty -eq '12.9') { $url = Try-Select -tableSet $sa22 -cudaWanted '12.8' -allowPyMissing }
-    if (-not $url) { $url = Try-Select -tableSet $saAll -cudaWanted $CudaPretty -allowPyMissing }
-    if (-not $url -and $CudaPretty -eq '12.9') { $url = Try-Select -tableSet $saAll -cudaWanted '12.8' -allowPyMissing }
-  }
-  return $url
-}
-
-function Install-AIWheel-Resolved {
-  param(
-    [Parameter(Mandatory)][string] $Package,      # "SageAttention" / "Flash Attention" / …
-    [Parameter(Mandatory)][string] $TorchVer,
-    [Parameter(Mandatory)][string] $CudaTag,
-    [Parameter(Mandatory)][string] $PythonMM,
-    [switch] $SageAttentionV22Only,
-    [switch] $AllowAbi3Fallback
-  )
-
-  Write-Section ("{0}" -f $Package)
-  Write-Info ("Selecting a compatible wheel (Torch {0}, CUDA {1}, Python {2}) …" -f $TorchVer, $CudaTag, $PythonMM)
-
-  $readme = Get-AIWindowsWhlReadme
-  $jsonText, $jsonObj = Parse-Readme-ToTablesJson -Markdown $readme
-  Save-JsonToScriptDir -JsonText $jsonText | Out-Null
-
-  $url = $null
-  if ($Package -match '^(?i)sageattention$' -and $SageAttentionV22Only) {
-    $url = Resolve-SageAttentionUrl-FromJson -JsonObj $jsonObj -TorchVer $TorchVer -CudaTag $CudaTag -PythonMM $PythonMM -AllowAbi3Fallback:$AllowAbi3Fallback
-  } else {
-    $tables = @($jsonObj.tables | Where-Object { $_.section -match [regex]::Escape($Package) })
-    $CudaPretty = Convert-CuToCuda $CudaTag
-    foreach ($tbl in $tables) {
-      $headers = @($tbl.header)
-      $torchCol = Find-ColumnName $headers @('(?i)pytorch','(?i)\btorch\b')
-      $pyCol    = Find-ColumnName $headers @('(?i)^python','(?i)python\s*ver','(?i)^py\b')
-      $cudaCol  = Find-ColumnName $headers @('(?i)^cuda','(?i)compute','(?i)cu\d')
-      $linkCol  = Find-ColumnName $headers @('(?i)download','(?i)link','(?i)href','(?i)wheel','(?i)\.whl')
-      if (-not $linkCol) { continue }
-      foreach ($r in @($tbl.rows)) {
-        $tv = if ($torchCol){ Get-Cell $r $torchCol } else { $null }
-        $pv = if ($pyCol)  { Get-Cell $r $pyCol } else { $null }
-        $cv = if ($cudaCol){ Get-Cell $r $cudaCol } else { $null }
-
-        $okTorch = (-not $torchCol) -or ($tv -and ($tv -match [regex]::Escape($TorchVer) -or $tv -match ([regex]::Escape(($TorchVer -split '\.')[0..1] -join '\.'))))
-        $okPy    = (-not $pyCol)    -or ($pv -and ($pv -match [regex]::Escape($PythonMM)))
-        $okCuda  = (-not $cudaCol)  -or ($cv -and ($cv -match [regex]::Escape($CudaPretty) -or ($CudaPretty -eq '12.9' -and $cv -match '12\.8')))
-
-        if ($okTorch -and $okPy -and $okCuda) {
-          $linkCell = Get-Cell $r $linkCol
-          $cand = Extract-LinkUrl $linkCell
-          if ($cand) { $url = $cand; break }
-        }
-      }
-      if ($url) { break }
-    }
-  }
-
-  if (-not $url) {
-    throw ("No matching wheel (even with CUDA-minor/abi3 fallback) for {0}{1} (Torch {2}, CUDA {3}, Python {4})." -f $Package, ($(if($SageAttentionV22Only){" 2.2"}else{""})), $TorchVer, $CudaTag, $PythonMM)
-  }
-
-  $wheelName = Split-Path -Leaf $url
-  Write-Ok ("Wheel selected: {0}" -f $wheelName)
-  if ($DebugLog) { Write-Info ("Source: {0}" -f $url) }
-
-  Write-Info ("Installing {0} …" -f $Package)
-  Install-WheelFromUrl -Url $url
-  Write-Ok ("{0} installed." -f $Package)
 }
 
 # --------------------- Post-Install ------------------------------------------
@@ -842,17 +750,17 @@ try {
     throw "Installed Torch build is CPU-only. SageAttention requires a CUDA build (e.g., cu128)."
   }
 
-  # 4) Install SageAttention 2.2 (via README→JSON, with 12.9→12.8 & optional ABI3)
+  # 4) Install SageAttention 2.2 (via wheels.json, with 12.9→12.8 & optional ABI3)
   Uninstall-Sage
   $pyMM = ($pyInfo.Version -split '\.')[0..1] -join '.'
-  Install-AIWheel-Resolved -Package 'SageAttention' -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM -SageAttentionV22Only -AllowAbi3Fallback
+  Install-AIWheel-FromIndex -Package 'SageAttention' -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM -SageAttentionV22Only -AllowAbi3Fallback
 
-  # 5) Optional extras (from the same README)
+  # 5) Optional extras (from the same wheels.json)
   if ($AutoFetchFromAIWheels) {
-    if ($InstallFlashAttention) { Install-AIWheel-Resolved -Package 'Flash Attention' -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM }
-    if ($InstallNATTEN)         { Install-AIWheel-Resolved -Package 'NATTEN'           -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM }
-    if ($InstallXFormers)       { Install-AIWheel-Resolved -Package 'xformers'         -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM }
-    if ($InstallBitsAndBytes)   { Install-AIWheel-Resolved -Package 'bitsandbytes'     -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM }
+    if ($InstallFlashAttention) { Install-AIWheel-FromIndex -Package 'Flash Attention' -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM }
+    if ($InstallNATTEN)         { Install-AIWheel-FromIndex -Package 'NATTEN'           -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM }
+    if ($InstallXFormers)       { Install-AIWheel-FromIndex -Package 'xformers'         -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM }
+    if ($InstallBitsAndBytes)   { Install-AIWheel-FromIndex -Package 'bitsandbytes'     -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM }
   }
 
   # Runners
