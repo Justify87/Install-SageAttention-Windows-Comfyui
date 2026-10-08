@@ -101,7 +101,7 @@ function Get-TritonMinor([string]$TorchVersion) {
 
 function Get-EnvironmentInfo {
   $code = @'
-import json, sys, site, importlib.metadata as m
+import json, sys, site, struct, importlib.metadata as m
 try:
     import torch
 except Exception as e:
@@ -119,6 +119,7 @@ print(json.dumps({
     "error": None,
     "python": ".".join(map(str, sys.version_info[:3])),
     "python_mm": ".".join(map(str, sys.version_info[:2])),
+    "python_bits": struct.calcsize("P") * 8,
     "cp": f"cp{sys.version_info.major}{sys.version_info.minor}",
     "torch": torch.__version__,
     "cuda": torch.version.cuda,
@@ -140,9 +141,10 @@ function Assert-PortableRoot {
   if (-not $IsWindows) { throw 'This installer supports Windows only.' }
   if (-not (Test-Path -LiteralPath $Py -PathType Leaf)) { throw 'python_embeded\python.exe was not found.' }
   if (-not (Test-Path -LiteralPath $ComfyMain -PathType Leaf)) { throw 'ComfyUI\main.py was not found.' }
-  $vcLocal = Join-Path (Split-Path $Py -Parent) 'vcruntime140.dll'
-  $vcSystem = Join-Path $env:SystemRoot 'System32\vcruntime140.dll'
-  if (-not (Test-Path $vcLocal) -and -not (Test-Path $vcSystem)) {
+  $pyHome = Split-Path $Py -Parent
+  $vc140 = @((Join-Path $pyHome 'vcruntime140.dll'), (Join-Path $env:SystemRoot 'System32\vcruntime140.dll'))
+  $vc140_1 = @((Join-Path $pyHome 'vcruntime140_1.dll'), (Join-Path $env:SystemRoot 'System32\vcruntime140_1.dll'))
+  if (-not ($vc140 | Where-Object { Test-Path $_ }) -or -not ($vc140_1 | Where-Object { Test-Path $_ })) {
     throw 'Microsoft Visual C++ 2015-2022 Redistributable (x64) was not detected.'
   }
   try {
@@ -154,6 +156,7 @@ function Assert-PortableRoot {
 }
 
 function Assert-Hardware([object]$EnvInfo) {
+  if ($EnvInfo.python_bits -ne 64) { throw '64-bit embedded Python is required.' }
   if (-not $EnvInfo.cuda_ok -or -not $EnvInfo.cuda) { throw 'The bundled PyTorch has no usable NVIDIA CUDA runtime.' }
   $supported = @('8.0','8.6','8.9','9.0','10.0','12.0','12.1')
   if ($EnvInfo.cc -notin $supported) {
@@ -213,6 +216,8 @@ function Resolve-CommunitySage([object]$EnvInfo) {
 
   $matches = foreach ($w in @($pkg.wheels)) {
     if (-not $w.url -or $w.url -notmatch '(?i)win_amd64\.whl') { continue }
+    $wheelUri = [uri][string]$w.url
+    if ($wheelUri.Scheme -ne 'https' -or $wheelUri.Host -notin @('github.com','huggingface.co')) { continue }
     if ($w.package_version -notmatch '^2\.2') { continue }
     if (-not (Test-Range $EnvInfo.torch $w.torch_version)) { continue }
     if (-not (Test-Range $EnvInfo.python_mm $w.python_version)) { continue }
@@ -273,7 +278,7 @@ function New-Plan([object]$EnvInfo, [object]$SageWheel, [string]$TritonMinor, [o
 }
 
 function Show-Environment([object]$E) {
-  Info "Python: $($E.python)"
+  Info "Python: $($E.python) ($($E.python_bits)-bit)"
   Info "PyTorch: $($E.torch)  [READ-ONLY]"
   Info "CUDA: $($E.cuda)"
   Info "GPU: $($E.gpu) (sm$($E.cc -replace '\.',''))"
@@ -309,7 +314,7 @@ function Backup-State([object]$EnvInfo, [object]$Plan) {
 
   $snapshot = Join-Path $script:BackupDir 'site-packages'
   New-Item -ItemType Directory -Path $snapshot -Force | Out-Null
-  foreach ($pattern in @('sageattention*','triton*')) {
+  foreach ($pattern in @('sageattention','sageattention-*.dist-info','sageattention.libs','triton','triton-*.dist-info','triton_windows-*.dist-info','triton_windows.libs')) {
     Get-ChildItem -LiteralPath $EnvInfo.site_packages -Filter $pattern -ErrorAction SilentlyContinue |
       Copy-Item -Destination $snapshot -Recurse -Force
   }
@@ -332,10 +337,10 @@ function Stage-Files([object]$Plan, [object]$SageWheel, [object]$PyDevAsset) {
 
   $tritonWheel = $null
   if ($Plan.Triton -eq 'INSTALL') {
-    Invoke-Proc $Py @('-m','pip','download','--only-binary=:all:','--no-deps','--dest',$stage,$Plan.TritonConstraint) 900 | Out-Null
+    Invoke-Proc $Py @('-m','pip','download','--index-url','https://pypi.org/simple','--only-binary=:all:','--no-deps','--dest',$stage,$Plan.TritonConstraint) 900 | Out-Null
     $tritonWheel = @(Get-ChildItem $stage -Filter 'triton_windows-*.whl' | Sort-Object Name -Descending)[0]
     if (-not $tritonWheel) { throw 'Triton wheel could not be staged.' }
-    Ok "Staged $($tritonWheel.Name)"
+    Ok "Staged $($tritonWheel.Name)  SHA256=$((Get-FileHash $tritonWheel.FullName -Algorithm SHA256).Hash)"
   }
 
   $sagePath = $null
@@ -343,14 +348,15 @@ function Stage-Files([object]$Plan, [object]$SageWheel, [object]$PyDevAsset) {
     $sagePath = Join-Path $stage $SageWheel.Name
     Invoke-WebRequest -Uri $SageWheel.Url -Headers @{ 'User-Agent'='ComfyUI-SageAttention-Installer' } -OutFile $sagePath -TimeoutSec 300
     if ((Get-Item $sagePath).Length -lt 100KB) { throw 'Downloaded SageAttention wheel is unexpectedly small.' }
-    Ok "Staged $($SageWheel.Name)"
+    Ok "Staged $($SageWheel.Name)  SHA256=$((Get-FileHash $sagePath -Algorithm SHA256).Hash)"
   }
 
   $devZip = $null
   if ($Plan.PythonDev -eq 'INSTALL') {
     $devZip = Join-Path $stage $PyDevAsset.Name
     Invoke-WebRequest -Uri $PyDevAsset.Url -Headers @{ 'User-Agent'='ComfyUI-SageAttention-Installer' } -OutFile $devZip -TimeoutSec 300
-    Ok "Staged $($PyDevAsset.Name)"
+    if ((Get-Item $devZip).Length -lt 10KB) { throw 'Downloaded Python developer archive is unexpectedly small.' }
+    Ok "Staged $($PyDevAsset.Name)  SHA256=$((Get-FileHash $devZip -Algorithm SHA256).Hash)"
   }
 
   [pscustomobject]@{
@@ -379,7 +385,7 @@ function Install-Wheel([string]$Path) {
 
 function Remove-TargetPackages([string]$SitePackages) {
   Invoke-Proc $Py @('-m','pip','uninstall','-y','sageattention','triton-windows','triton') 300 | Out-Null
-  foreach ($pattern in @('sageattention*','triton*')) {
+  foreach ($pattern in @('sageattention','sageattention-*.dist-info','sageattention.libs','triton','triton-*.dist-info','triton_windows-*.dist-info','triton_windows.libs')) {
     Get-ChildItem -LiteralPath $SitePackages -Filter $pattern -ErrorAction SilentlyContinue |
       Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
   }
@@ -486,7 +492,10 @@ try {
   if ($sageWheel.Source -ne 'Comfy-Org/wheels') {
     Warn "Community fallback selected: $($sageWheel.Source)"
   }
-  $pyDevAsset = Resolve-PyDevAsset $envInfo.python_mm
+  $includePresent = Test-Path (Join-Path $Root 'python_embeded\include\Python.h')
+  $libsPresent = (Test-Path (Join-Path $Root 'python_embeded\libs')) -and
+    (@(Get-ChildItem (Join-Path $Root 'python_embeded\libs') -Filter 'python*.lib' -ErrorAction SilentlyContinue).Count -gt 0)
+  $pyDevAsset = if ($includePresent -and $libsPresent) { $null } else { Resolve-PyDevAsset $envInfo.python_mm }
   $plan = New-Plan $envInfo $sageWheel $tritonMinor $pyDevAsset
 
   Step 'Install plan'
