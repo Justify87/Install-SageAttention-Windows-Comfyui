@@ -1,249 +1,260 @@
-# Triton & SageAttention Installer for ComfyUI (PowerShell 7)
+# Install SageAttention on ComfyUI Windows Portable
 
-This repo contains a **single PowerShell script** that installs **Triton** and **SageAttention** for the **ComfyUI Windows portable** build. It detects your environment, installs a matching CUDA build of PyTorch (or uses the one you already have), fetches the correct SageAttention wheel from the **AI-windows-whl JSON index**, and—when needed—adds the **Python `include/` and `libs/`** folders required by Triton on Python 3.13.
+A small PowerShell installer for **Triton + SageAttention** on the official **ComfyUI Windows Portable** build.
 
----
+This is a complete rewrite of the old installer. The new version deliberately does **not** manage your PyTorch stack.
 
-## ✨ What the script does
+> **Safety rule:** `torch`, `torchvision`, and `torchaudio` are read-only. The installer never installs, removes, upgrades, or downgrades them.
 
-* **Preflight**: Prints your Python version/CP tag, Torch version, CUDA runtime, and GPU/driver (via `nvidia-smi`).
+## What it does
 
-  * In **`-DryRun`**, the same detection calls are executed (Python imports & `nvidia-smi`) — only installs/changes are skipped.
-* **Torch auto-install**: If Torch is missing, installs it automatically (prefers CUDA builds; CPU fallback is last resort — SageAttention needs CUDA).
-* **Torch-first mode**: Optionally force a specific Torch + CUDA combo (e.g., `torch==2.8.0` + `cu128`).
-* **Triton**: Installs `triton-windows<3.4` and (on Python 3.13) downloads & places **only** the `include/` and `libs/` folders into `python_embeded/`.
+The installer follows one simple flow:
 
-  * *It **never** touches `Lib/`.*
-* **SageAttention**: Selects a compatible wheel for **SageAttention 2.2 (SageAttention2++)** from the JSON index:
+**Detect → Resolve → Plan → Backup → Stage → Install → Verify → Recover if needed**
 
-  * Source: `https://raw.githubusercontent.com/wildminder/AI-windows-whl/refs/heads/main/wheels.json`
-  * **CUDA minor fallback** (e.g., 12.9 → 12.8) if necessary
-  * **ABI3/py3 fallback** is automatic when Python exact match isn’t present
-* **Optional extras** (if you opt in): `FlashAttention`, `NATTEN`, `xformers`, `bitsandbytes` (also resolved from the JSON index)
-* **Post-install checks**: Verifies imports for `torch` and `sageattention`, prints CUDA availability.
-* **Quality of life**: Creates runners, saves an environment snapshot, and stores the fetched JSON index for transparency.
+It:
 
----
+- detects the embedded Python, PyTorch, CUDA, GPU, compute capability, Triton and SageAttention
+- checks that ComfyUI's embedded Python is not currently running
+- selects the Triton minor release from the maintained `triton-windows` PyTorch compatibility matrix
+- keeps an already compatible Triton installation
+- installs `triton-windows` from **PyPI**
+- adds the embedded-Python `include/` and `libs/` folders only when they are missing
+- looks for an exact SageAttention wheel from **Comfy-Org/wheels** first
+- falls back to **wildminder/AI-windows-whl** only when Comfy-Org has no exact wheel
+- supports CPython ABI3 SageAttention wheels
+- stages all required downloads before package changes begin
+- creates a small timestamped backup
+- runs a real Triton GPU kernel and a real SageAttention GPU smoke test
+- compares the SageAttention result with PyTorch SDPA
+- automatically restores the previous Triton/SageAttention state if installation or verification fails
+- can optionally create `run_nvidia_gpu_sageattention.bat`
 
-## 🧰 Requirements
+## What it does NOT do
 
-* **Windows 10/11, 64-bit**
-* **PowerShell 7+**
-* **NVIDIA GPU** with a working **NVIDIA driver** (`nvidia-smi` should run)
-* **ComfyUI Windows portable** root (run the script from that folder), e.g.:
+It does **not**:
 
-  ```
-  .\ComfyUI\main.py
-  .\python_embeded\python.exe
-  ```
-* Internet access (to download wheels and `wheels.json`)
+- change PyTorch
+- change torchvision or torchaudio
+- install a CUDA Toolkit
+- compile SageAttention from source
+- install xformers, FlashAttention, NATTEN, bitsandbytes, or other extras
+- modify `python_embeded\Lib`
+- overwrite an existing SageAttention runner
+- guess unsupported CUDA minor-version substitutions
 
-> **Note:** `nvcc` (CUDA Toolkit) is **optional**. The script checks for it to inform you; it’s not required for ComfyUI.
+If no exact supported SageAttention wheel can be resolved, the installer stops without changing the environment.
 
----
+## Requirements
 
-## 📦 Files the script may create
+- Windows 10/11 x64
+- PowerShell 7+
+- official ComfyUI Windows Portable layout:
+  - `ComfyUI\main.py`
+  - `python_embeded\python.exe`
+- NVIDIA GPU supported by current SageAttention 2.x upstream kernels
+- working CUDA-enabled PyTorch already included in ComfyUI Portable
+- Microsoft Visual C++ 2015-2022 Redistributable (x64)
+- internet access
 
-* `.\logs\Install-SageAttention-*.log` (transcript)
-* `.\logs\requirements.before.txt` and `.\logs\requirements.after.txt`
-* `.\aiwheels_index.json` (saved copy of the JSON index; skipped in `-DryRun`)
-* `.\run_nvidia_gpu_sageattention.bat` and/or `.\Run-ComfyUI-Sage.ps1` (runners)
-* `.\python_embeded\include\` and `.\python_embeded\libs\` (for Triton on Python 3.13)
+Close ComfyUI before running the installer.
 
----
+## Installation
 
-## 🚀 Quick start
+Copy `Install-SageAttention.ps1` into the **ComfyUI Windows Portable root folder**.
 
-1. Place `Install-SageAttention.ps1` into your **ComfyUI portable root** (same folder as `python_embeded` and `ComfyUI`).
-2. Open **PowerShell 7** in that folder.
-3. Run:
+Example:
 
-   ```powershell
-   .\Install-SageAttention.ps1 -CreateBatRunner
-   ```
-4. After success, launch ComfyUI with SageAttention:
-
-   ```bat
-   .\run_nvidia_gpu_sageattention.bat
-   ```
-
-   or
-
-   ```powershell
-   .\python_embeded\python.exe -s .\ComfyUI\main.py --windows-standalone-build --use-sage-attention
-   ```
-
----
-
-## 🔧 Common options
-
-| Category         | Parameter                                                            | What it does                                                                                                         |
-| ---------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Execution        | `-DryRun`                                                            | Execute detection and planning, but don’t install/uninstall or write files.                                          |
-| Output           | `-DebugLog` / `-TraceScript`                                         | Print timings and very verbose execution details.                                                                    |
-| Torch (force)    | `-TorchVersion 2.8.0 -CudaTag cu128`                                 | Install exactly this Torch + CUDA before SageAttention.                                                              |
-| Torch (auto)     | *(default)*                                                          | If Torch is missing, tries CUDA builds that fit your GPU/driver; CPU only as last resort (SageAttention needs CUDA). |
-| Pip control      | `-PipIndexUrl` / `-PipExtraIndexUrl`                                 | Point pip at custom indexes (e.g., PyTorch wheels).                                                                  |
-| Caching          | `-NoCache`                                                           | Use `--no-cache-dir` for pip installs.                                                                               |
-| Triton dev files | `-SkipTritonPyDev`, `-ForceTritonPyDev`, `-TritonPyDevZipUrl <url>`  | Control the Python 3.13 headers/libs step.                                                                           |
-| Extras           | `-AutoFetchFromAIWheels -InstallFlashAttention -InstallXFormers ...` | Install extra packages from the same wheel index.                                                                    |
-| Runners          | `-CreateBatRunner`, `-CreatePsRunner`                                | Create handy launchers for ComfyUI + SageAttention.                                                                  |
-| JSON index       | `-WheelsJsonUrl <url>` / `-WheelsJsonOut <path>`                     | Override the AI-windows-whl JSON endpoint or the output path.                                                        |
-
----
-
-## 🧪 Examples
-
-Force a specific Torch + CUDA, then install SageAttention 2.2:
-
-```powershell
-.\Install-SageAttention.ps1 -TorchVersion 2.8.0 -CudaTag cu128 -CreateBatRunner
+```text
+ComfyUI_windows_portable\
+├─ ComfyUI\
+├─ python_embeded\
+└─ Install-SageAttention.ps1
 ```
 
-Let the script auto-detect Torch (prefer CUDA), install Triton & SageAttention, and create runners:
-
-```powershell
-.\Install-SageAttention.ps1 -CreateBatRunner -CreatePsRunner
-```
-
-Verbose diagnostics (network issues? pip errors?):
-
-```powershell
-.\Install-SageAttention.ps1 -DebugLog
-```
-
-Use the official PyTorch extra index explicitly (when forcing versions):
-
-```powershell
-.\Install-SageAttention.ps1 -TorchVersion 2.8.0 -CudaTag cu129 -PipExtraIndexUrl https://download.pytorch.org/whl/cu129
-```
-
-Install extras from the wheel index too:
-
-```powershell
-.\Install-SageAttention.ps1 -AutoFetchFromAIWheels -InstallFlashAttention -InstallXFormers
-```
-
-Plan only (no changes, but real detections and resolution):
+Open PowerShell 7 in that folder and first run a dry run:
 
 ```powershell
 .\Install-SageAttention.ps1 -DryRun
 ```
 
----
+If the plan looks correct:
 
-## 🖥️ Sample output (condensed)
-
-```
-▶ Preflight
-  ✓ Python: 3.13.6  (cp313)
-  ✓ Torch: 2.8.0+cu129 (CUDA 12.9, available=True)
-  • CUDA Toolkit (nvcc): not found
-  ✓ GPU/Driver: NVIDIA GeForce RTX 4060 Ti, 581.15
-
-▶ Triton prerequisites
-  ✓ Triton prerequisite: Python headers & libs already present.
-
-▶ Install plan
-  • Installing Triton …
-  ✓ Triton ready.
-
-▶ SageAttention
-  • Selecting a compatible wheel (Torch 2.8.0, CUDA cu129, Python 3.13) …
-
-▶ Fetch wheels.json
-  ✓ Saved wheels.json → .\aiwheels_index.json
-  ✓ Wheel selected: sageattention-2.2.0+cu128torch2.8.0-cp313-cp313-win_amd64.whl
-  • Installing SageAttention …
-  ✓ SageAttention installed.
-
-▶ Verify
-  ✓ torch import OK (2.8.0+cu129)
-  ✓ sageattention import OK ()
-  • CUDA runtime: 12.9, available: True
-
-▶ Done
-  ✓ Installation finished.
-  Start ComfyUI with SageAttention:
-    .\run_nvidia_gpu_sageattention.bat
+```powershell
+.\Install-SageAttention.ps1
 ```
 
----
+To also create a separate SageAttention launcher:
 
-## 📝 Notes on Python 3.13 (Triton)
+```powershell
+.\Install-SageAttention.ps1 -CreateRunner
+```
 
-Triton’s Windows wheels expect the Python **developer files** to exist alongside the embedded interpreter.
-The script **automatically** downloads a ZIP that contains **two folders**:
+The launcher starts ComfyUI with:
 
-* `include/`
-* `libs/`
+```text
+--use-sage-attention
+```
 
-It copies them into `python_embeded\`.
-**Do not** confuse `libs/` with `Lib/` — the script never touches `Lib/`.
+SageAttention is optional optimization. Some models/workflows can behave better with ComfyUI's default attention, so the installer does not force the flag into your existing launch files.
 
-You can override the download URL with `-TritonPyDevZipUrl`.
+## Dry run
 
----
+`-DryRun` performs the real environment detection and online resolver checks, then prints the exact plan.
 
-## 🧯 Troubleshooting
+It does **not**:
 
-**“Installed Torch build is CPU-only”**
+- create logs
+- create backups
+- download wheels to disk
+- install/uninstall packages
+- alter Python developer files
+- create a runner
 
-* Reinstall with a CUDA tag:
+Example:
 
-  ```powershell
-  .\Install-SageAttention.ps1 -TorchVersion 2.8.0 -CudaTag cu128
-  ```
+```powershell
+.\Install-SageAttention.ps1 -DryRun
+```
 
-**“No matching wheel for your combo”**
+## Sources and priority
 
-* The resolver automatically tries **CUDA minor fallback** (12.9 → 12.8) and allows **ABI3/py3** when needed.
-* Consider aligning to a common pair (e.g., Torch `2.8.0` + `cu128`).
+### Triton
 
-**Pip cannot connect / corporate networks**
+Triton is resolved from the maintained Windows project:
 
-* Set `-PipIndexUrl` / `-PipExtraIndexUrl` to mirrors you can access.
-* Configure proxy env vars: `HTTP_PROXY`, `HTTPS_PROXY`.
+- `triton-lang/triton-windows`
+- `triton-windows` on PyPI
 
-**Execution policy blocks the script**
+Current matrix used by the installer:
 
-* Launch with:
+| PyTorch | Triton |
+|---|---|
+| 2.4–2.5 | 3.1 |
+| 2.6 | 3.2 |
+| 2.7 | 3.3 |
+| 2.8 | 3.4 |
+| 2.9 | 3.5 |
+| 2.10–2.11 | 3.6 |
+| 2.12–2.13 | 3.7 |
+| 2.14 | 3.8 |
 
-  ```powershell
-  pwsh -ExecutionPolicy Bypass -File .\Install-SageAttention.ps1
-  ```
+The installer pins the matching Triton **minor** range rather than blindly installing the newest release.
 
-**`nvcc` not found**
+### SageAttention
 
-* That’s OK; only the driver and CUDA runtime bundled with the Torch wheel are required. `nvcc` is optional.
+Resolution order:
 
----
+1. **Comfy-Org/wheels** — preferred first-party ComfyUI ecosystem source
+2. **wildminder/AI-windows-whl** — community fallback
+3. **thu-ml/SageAttention** — upstream requirements/hardware behavior used as Ground Truth, not an automatic source-build fallback
 
-## 🔍 How the wheel is selected (JSON-based)
+The community fallback is clearly shown in the console and log.
 
-1. Downloads **`wheels.json`** from **AI-windows-whl**.
-2. Scans packages and their wheel entries.
-3. Matches on:
+The fallback resolver reads the current `wheels.json` range fields for:
 
-   * **Torch** version (exact or same major.minor),
-   * **CUDA** (pretty version, with **12.9 → 12.8** fallback),
-   * **Python** (major.minor; **ABI3/py3** allowed if needed).
-4. Installs the selected wheel via pip.
-5. Saves a copy of the JSON as `aiwheels_index.json` (skipped in `-DryRun`).
+- PyTorch
+- Python
+- CUDA
 
----
+It also understands ABI3 wheel tags.
 
-## 🙌 Credits
+No undocumented CUDA alias is applied. For example, a CUDA 13.2 environment is not silently given a CUDA 13.0 wheel.
 
-* Community wheel index: **wildminder/AI-windows-whl**
-* Windows wheels: **woct0rdho** (SageAttention, Triton Windows)
-* PyTorch, Triton, and SageAttention maintainers & contributors
-* ComfyUI project & community
+## Backup and recovery
 
----
+Before the first package mutation the installer creates:
 
-## 🛡️ License
+```text
+backup\Install-SageAttention-YYYYMMDD-HHMMSS\
+```
 
-This repository is released under the **MIT License**. See [LICENSE](./LICENSE) for details.
+It contains:
 
+- detected environment
+- install plan
+- `pip freeze`
+- copies of existing SageAttention/Triton package files
+- copies of `python_embeded\include` / `libs` only when those folders must be changed
+- staged download files
 
+If installation or GPU verification fails, the installer removes only the Triton/SageAttention changes it made and restores the previous snapshot.
+
+PyTorch is never part of recovery because PyTorch is never changed.
+
+## Logs
+
+Normal installs create:
+
+```text
+logs\Install-SageAttention-YYYYMMDD-HHMMSS.log
+```
+
+Dry runs do not write a log.
+
+## Verification
+
+A successful install requires more than an import.
+
+The script verifies:
+
+1. CUDA is available through the existing PyTorch
+2. Triton imports
+3. a tiny Triton JIT GPU kernel executes correctly
+4. SageAttention imports
+5. a tiny SageAttention CUDA attention operation executes
+6. output contains finite values
+7. output has high cosine similarity to PyTorch SDPA
+8. the PyTorch version is exactly unchanged after installation
+
+Only then is the installation reported as successful.
+
+## Troubleshooting
+
+### ComfyUI is running
+
+Close ComfyUI completely and run the installer again. The installer refuses to modify the embedded Python while it is in use.
+
+### No matching SageAttention wheel
+
+Your Python/PyTorch/CUDA combination is not currently covered by either Comfy-Org or the configured community fallback.
+
+The installer intentionally stops rather than changing Torch or guessing a CUDA wheel.
+
+Try again after the wheel repositories have added support.
+
+### Missing `include` / `libs`
+
+Embedded Python needs developer headers for Triton. The installer follows the current `triton-windows` documentation and resolves the matching `python_X.Y.Z_include_libs.zip` asset referenced there.
+
+It never modifies `python_embeded\Lib`.
+
+If no documented asset exists for your Python minor version, the installer stops safely.
+
+### Visual C++ runtime not detected
+
+Install the current **Microsoft Visual C++ Redistributable for Visual Studio 2015-2022 (x64)**, then retry.
+
+### Installation failed
+
+Check the timestamped log under `logs\`.
+
+If mutation had already started, the script automatically attempts recovery and preserves the backup folder for manual inspection.
+
+## Why Torch is read-only
+
+ComfyUI Portable already ships a selected Python/PyTorch/CUDA stack. Replacing that stack just to install SageAttention can break ComfyUI, custom nodes, and compiled extensions.
+
+This installer therefore adapts **Triton and SageAttention to ComfyUI**, never the other way around.
+
+## Upstream projects
+
+- ComfyUI: https://github.com/Comfy-Org/ComfyUI
+- Comfy wheels: https://github.com/Comfy-Org/wheels
+- Triton Windows: https://github.com/triton-lang/triton-windows
+- SageAttention: https://github.com/thu-ml/SageAttention
+- Community Windows wheel index: https://github.com/wildminder/AI-windows-whl
+
+## License
+
+MIT — see [LICENSE](LICENSE).
