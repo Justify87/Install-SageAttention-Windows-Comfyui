@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "notes": "Static parity fixtures for central PowerShell/Python resolver decisions. Availability is the post-resolver result, so hardware and actual wheel availability remain separate inputs.",
+  "scenarios": [
+    {
+      "name": "ampere_sage2",
+      "cc": "8.6",
+      "python": "3.13",
+      "torch": "2.10.0+cu128",
+      "cuda": "12.8",
+      "sage2_available": true,
+      "sage3_available": false,
+      "python_expected": "Sage2",
+      "powershell_expected": "Sage2",
+      "triton_minor": "3.6"
+    },
+    {
+      "name": "ada_sage2",
+      "cc": "8.9",
+      "python": "3.13",
+      "torch": "2.10.0+cu128",
+      "cuda": "12.8",
+      "sage2_available": true,
+      "sage3_available": false,
+      "python_expected": "Sage2",
+      "powershell_expected": "Sage2",
+      "triton_minor": "3.6"
+    },
+    {
+      "name": "hopper_sage2",
+      "cc": "9.0",
+      "python": "3.13",
+      "torch": "2.11.0+cu128",
+      "cuda": "12.8",
+      "sage2_available": true,
+      "sage3_available": false,
+      "python_expected": "Sage2",
+      "powershell_expected": "Sage2",
+      "triton_minor": "3.6"
+    },
+    {
+      "name": "blackwell_datacenter_sage3",
+      "cc": "10.0",
+      "python": "3.13",
+      "torch": "2.10.0+cu128",
+      "cuda": "12.8",
+      "sage2_available": false,
+      "sage3_available": true,
+      "python_expected": "Sage3",
+      "powershell_expected": "Sage3",
+      "triton_minor": "3.6"
+    },
+    {
+      "name": "blackwell_only_sage2",
+      "cc": "12.0",
+      "python": "3.13",
+      "torch": "2.12.0+cu128",
+      "cuda": "12.8",
+      "sage2_available": true,
+      "sage3_available": false,
+      "python_expected": "Sage2",
+      "powershell_expected": "Sage2",
+      "triton_minor": "3.7"
+    },
+    {
+      "name": "blackwell_only_sage3",
+      "cc": "12.0",
+      "python": "3.13",
+      "torch": "2.13.0+cu130",
+      "cuda": "13.0",
+      "sage2_available": false,
+      "sage3_available": true,
+      "python_expected": "Sage3",
+      "powershell_expected": "Sage3",
+      "triton_minor": "3.7"
+    },
+    {
+      "name": "blackwell_both",
+      "cc": "12.0",
+      "python": "3.13",
+      "torch": "2.14.0+cu130",
+      "cuda": "13.0",
+      "sage2_available": true,
+      "sage3_available": true,
+      "python_expected": "Both",
+      "powershell_expected": "Both",
+      "triton_minor": "3.8"
+    },
+    {
+      "name": "blackwell_none",
+      "cc": "12.0",
+      "python": "3.13",
+      "torch": "2.10.0+cu128",
+      "cuda": "12.8",
+      "sage2_available": false,
+      "sage3_available": false,
+      "python_expected": null,
+      "powershell_expected": null,
+      "triton_minor": "3.6"
+    }
+  ]
+}
