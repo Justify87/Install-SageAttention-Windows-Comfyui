@@ -1,0 +1,115 @@
+name: Apply PR review fixes once
+
+on:
+  push:
+    branches: [feature/python-installer]
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/python-installer
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Apply review fixes
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+
+          p = Path('Install-SageAttention.py')
+          s = p.read_text()
+          s = s.replace('SAGE3_RUNTIME_ARCHS = frozenset({"12.0", "12.1"})', 'SAGE3_RUNTIME_ARCHS = frozenset({"10.0", "12.0", "12.1"})')
+          old = '''    if not version_at_least(env.torch, "2.8"):\n        return "SageAttention 3 upstream requires PyTorch 2.8 or newer."\n    # Do not impose the upstream README's example/base-environment Python floor\n    # as a hard runtime block: the current Comfy-Org SA3 build matrix explicitly\n    # publishes Windows combinations for older supported CPython minors too. The\n    # resolver therefore lets actual wheel availability decide Python support.\n    return None\n'''
+          new = '''    if not version_at_least(env.torch, "2.8"):\n        return "SageAttention 3 upstream requires PyTorch 2.8 or newer."\n    if not version_at_least(env.python_mm, "3.13"):\n        return "SageAttention 3 upstream currently requires Python 3.13 or newer."\n    return None\n'''
+          assert old in s
+          s = s.replace(old, new)
+          old = '''def remove_package(py: Path, root: Path, package: str) -> None:\n    pip_args = ["uninstall", "-y", package]\n    assert_safe_pip_mutation(pip_args)\n    run_process(py, ["-s", "-B", "-m", "pip", *pip_args], cwd=root, timeout=300, allow_failure=True)\n'''
+          new = '''def remove_package(py: Path, root: Path, package: str, *, allow_failure: bool = False) -> None:\n    pip_args = ["uninstall", "-y", package]\n    assert_safe_pip_mutation(pip_args)\n    run_process(\n        py,\n        ["-s", "-B", "-m", "pip", *pip_args],\n        cwd=root,\n        timeout=300,\n        allow_failure=allow_failure,\n    )\n'''
+          assert old in s
+          s = s.replace(old, new)
+          s = s.replace('''        for package in packages:\n            remove_package(py, root, package)\n''', '''        for package in packages:\n            remove_package(py, root, package, allow_failure=True)\n''')
+          old = '''    after = get_environment_info(py, root)\n    if after.torch_snapshot() != before.torch_snapshot():\n'''
+          new = '''    after = get_environment_info(py, root)\n    if plan.legacy_triton == "REMOVE" and after.legacy_triton:\n        raise InstallerError(\n            f"Legacy triton is still installed after conflict removal ({after.legacy_triton})."\n        )\n    if after.torch_snapshot() != before.torch_snapshot():\n'''
+          assert old in s
+          p.write_text(s.replace(old, new))
+
+          p = Path('Install-SageAttention.ps1')
+          s = p.read_text()
+          s = s.replace('# Current upstream SageAttention3 runtime kernels explicitly accept sm120/sm121.\n', '# Current upstream SageAttention3 build code explicitly accepts sm100/sm120/sm121.\n')
+          s = s.replace("$Sage3RuntimeArchs = @('12.0','12.1')", "$Sage3RuntimeArchs = @('10.0','12.0','12.1')")
+          old = '''  if (-not (Test-MinVersion $EnvInfo.cuda '12.8')) { return 'SageAttention 3 requires CUDA 12.8 or newer.' }\n  if (-not (Test-MinVersion $EnvInfo.torch '2.8')) { return 'SageAttention 3 upstream requires PyTorch 2.8 or newer.' }\n  return $null\n'''
+          new = '''  if (-not (Test-MinVersion $EnvInfo.cuda '12.8')) { return 'SageAttention 3 requires CUDA 12.8 or newer.' }\n  if (-not (Test-MinVersion $EnvInfo.torch '2.8')) { return 'SageAttention 3 upstream requires PyTorch 2.8 or newer.' }\n  if (-not (Test-MinVersion $EnvInfo.python_mm '3.13')) { return 'SageAttention 3 upstream currently requires Python 3.13 or newer.' }\n  return $null\n'''
+          assert old in s
+          s = s.replace(old, new)
+          old = '''function Remove-Package([string]$PackageName) {\n  Invoke-Proc $Py @('-m','pip','uninstall','-y',$PackageName) 300 -AllowFailure | Out-Null\n}\n'''
+          new = '''function Remove-Package([string]$PackageName, [switch]$AllowFailure) {\n  if ($AllowFailure) { Invoke-Proc $Py @('-m','pip','uninstall','-y',$PackageName) 300 -AllowFailure | Out-Null }\n  else { Invoke-Proc $Py @('-m','pip','uninstall','-y',$PackageName) 300 | Out-Null }\n}\n'''
+          assert old in s
+          s = s.replace(old, new)
+          s = s.replace('foreach ($pkg in $mutated) { Remove-Package $pkg }', 'foreach ($pkg in $mutated) { Remove-Package $pkg -AllowFailure }')
+          p.write_text(s)
+
+          p = Path('tests/test_installer.py')
+          s = p.read_text()
+          old = '''    def test_sage3_python_support_is_resolver_driven(self):\n        # Current Comfy-Org SA3 wheels include multiple CPython minors, so Python\n        # compatibility is resolved from wheel/build metadata rather than a hard\n        # installer floor. Hardware/runtime requirements still apply.\n        self.assertIsNone(installer.test_sage3_hardware(make_env(cc="12.0", python_mm="3.12", torch="2.9.0", cuda="12.8")))\n        self.assertIsNone(installer.test_sage3_hardware(make_env(cc="12.0", python_mm="3.13", torch="2.9.0", cuda="12.8")))\n'''
+          new = '''    def test_sage3_upstream_python_floor(self):\n        self.assertIn(\n            "Python 3.13",\n            installer.test_sage3_hardware(make_env(cc="12.0", python_mm="3.12", torch="2.9.0", cuda="12.8")),\n        )\n        self.assertIsNone(installer.test_sage3_hardware(make_env(cc="12.0", python_mm="3.13", torch="2.9.0", cuda="12.8")))\n'''
+          assert old in s
+          s = s.replace(old, new)
+          marker = '\nclass BackendEvaluationTests(unittest.TestCase):\n'
+          add = '''\nclass BackendEvaluationTests(unittest.TestCase):\n    def test_sage3_accepts_sm100_current_upstream(self):\n        env = make_env(cc="10.0", python_mm="3.13", torch="2.10.0+cu128", cuda="12.8")\n        self.assertIsNone(installer.test_sage3_hardware(env))\n\n    def test_sage3_rejects_python_below_313(self):\n        env = make_env(cc="12.0", python_mm="3.12", torch="2.10.0+cu128", cuda="12.8")\n        reason = installer.test_sage3_hardware(env)\n        self.assertIsNotNone(reason)\n        self.assertIn("Python 3.13", reason)\n'''
+          assert marker in s
+          s = s.replace(marker, add, 1)
+          cls = s.index('class MutationSafetyTests')
+          end = s.index('\nclass ', cls + 1)
+          add2 = '''\n    def test_legacy_triton_uninstall_is_strict_by_default(self):\n        calls = []\n        original = installer.run_process\n        try:\n            def fake_run_process(executable, args, **kwargs):\n                calls.append((list(args), kwargs.get("allow_failure")))\n                return types.SimpleNamespace(returncode=0, stdout="", stderr="")\n            installer.run_process = fake_run_process\n            installer.remove_package(Path("python.exe"), Path("."), "triton")\n            self.assertEqual(calls[-1][1], False)\n            installer.remove_package(Path("python.exe"), Path("."), "triton", allow_failure=True)\n            self.assertEqual(calls[-1][1], True)\n        finally:\n            installer.run_process = original\n'''
+          s = s[:end] + add2 + s[end:]
+          p.write_text(s)
+
+          p = Path('tests/resolver_fixtures.json')
+          data = json.loads(p.read_text())
+          row = {"name":"blackwell_datacenter_sage3","cc":"10.0","python":"3.13","torch":"2.10.0+cu128","cuda":"12.8","sage2_available":False,"sage3_available":True,"python_expected":"Sage3","powershell_expected":"Sage3","triton_minor":"3.6"}
+          if not any(x['name'] == row['name'] for x in data['scenarios']):
+              idx = next((i for i, x in enumerate(data['scenarios']) if x['name'].startswith('blackwell_')), len(data['scenarios']))
+              data['scenarios'].insert(idx, row)
+          p.write_text(json.dumps(data, indent=2) + '\n')
+
+          p = Path('README.md')
+          s = p.read_text()
+          old = '''3. `thu-ml/SageAttention/sageattention3_blackwell` as upstream runtime/hardware ground truth\n\nThe current SageAttention 3 implementation still uses Triton during preprocessing, so Sage3-only plans also resolve a compatible `triton-windows` path.\n'''
+          new = '''3. `thu-ml/SageAttention/sageattention3_blackwell` as upstream runtime/hardware ground truth\n\nCurrent upstream SA3 requirements enforced by the installers are **Python 3.13+**, **PyTorch 2.8+**, and **CUDA 12.8+**. The current upstream build code explicitly handles Blackwell `sm_100`, `sm_120`, and `sm_121`; actual Windows wheel architecture coverage is checked separately, so runtime support alone never makes a wheel eligible.\n\nThe current SageAttention 3 implementation still uses Triton during preprocessing, so Sage3-only plans also resolve a compatible `triton-windows` path.\n'''
+          assert old in s
+          s = s.replace(old, new)
+          old = '''Possible reasons include:\n\n- current upstream runtime support does not include the exact compute capability\n- no official Comfy-Org wheel covers the detected Python/PyTorch/CUDA/architecture combination\n'''
+          new = '''Possible reasons include:\n\n- current upstream runtime/version requirements are not met (currently Python 3.13+, PyTorch 2.8+, CUDA 12.8+)\n- current upstream runtime support does not include the exact compute capability\n- no official Comfy-Org wheel covers the detected Python/PyTorch/CUDA/architecture combination\n'''
+          assert old in s
+          p.write_text(s.replace(old, new))
+
+          p = Path('tests/Test-ResolverParity.ps1')
+          s = p.read_text()
+          s += '''\n$installer = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\\Install-SageAttention.ps1') -Raw\nif ($installer -notmatch "Sage3RuntimeArchs = @\\('10\\.0','12\\.0','12\\.1'\\)") { throw 'PowerShell SA3 runtime architecture parity check failed.' }\nif ($installer -notmatch "Python 3\\.13 or newer") { throw 'PowerShell SA3 Python floor parity check failed.' }\nif ($installer -notmatch 'Remove-Package \\$pkg -AllowFailure') { throw 'PowerShell recovery uninstall behavior check failed.' }\n'''
+          p.write_text(s)
+
+      - name: Run Python unit tests
+        run: python -B -m unittest -v tests.test_installer
+
+      - name: Run PowerShell parity smoke test
+        shell: pwsh
+        run: ./tests/Test-ResolverParity.ps1
+
+      - name: Commit review fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Install-SageAttention.py Install-SageAttention.ps1 README.md tests/test_installer.py tests/resolver_fixtures.json tests/Test-ResolverParity.ps1
+          git commit -m "Fix review findings for Python installer" || exit 0
+          git push origin HEAD:feature/python-installer
