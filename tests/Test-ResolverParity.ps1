@@ -37,3 +37,8 @@ foreach ($row in $data.scenarios) {
   if ($row.powershell_expected -ne $row.python_expected) { throw "Cross-installer fixture mismatch: $($row.name)" }
 }
 Write-Host "Resolver parity fixtures passed: $($data.scenarios.Count) scenarios"
+
+$installer = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Install-SageAttention.ps1') -Raw
+if ($installer -notmatch "Sage3RuntimeArchs = @\('10\.0','12\.0','12\.1'\)") { throw 'PowerShell SA3 runtime architecture parity check failed.' }
+if ($installer -notmatch "Python 3\.13 or newer") { throw 'PowerShell SA3 Python floor parity check failed.' }
+if ($installer -notmatch 'Remove-Package \$pkg -AllowFailure') { throw 'PowerShell recovery uninstall behavior check failed.' }

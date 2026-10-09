@@ -33,9 +33,9 @@ $CommunityIndexUrl = 'https://raw.githubusercontent.com/wildminder/AI-windows-wh
 $PyDevReleaseApi = 'https://api.github.com/repos/woct0rdho/triton-windows/releases/tags/v3.0.0-windows.post1'
 $UserAgent = 'ComfyUI-SageAttention-Installer/3'
 
-# Current upstream SageAttention3 runtime kernels explicitly accept sm120/sm121.
+# Current upstream SageAttention3 build code explicitly accepts sm100/sm120/sm121.
 # Prebuilt Windows wheel architecture must ALSO be proven by the selected wheel source.
-$Sage3RuntimeArchs = @('12.0','12.1')
+$Sage3RuntimeArchs = @('10.0','12.0','12.1')
 $CommunitySage3VerifiedArchs = @('12.0')
 
 $script:LogPath = $null
@@ -460,6 +460,7 @@ function Test-Sage3Hardware([object]$EnvInfo) {
   }
   if (-not (Test-MinVersion $EnvInfo.cuda '12.8')) { return 'SageAttention 3 requires CUDA 12.8 or newer.' }
   if (-not (Test-MinVersion $EnvInfo.torch '2.8')) { return 'SageAttention 3 upstream requires PyTorch 2.8 or newer.' }
+  if (-not (Test-MinVersion $EnvInfo.python_mm '3.13')) { return 'SageAttention 3 upstream currently requires Python 3.13 or newer.' }
   return $null
 }
 
@@ -813,8 +814,9 @@ function Install-Wheel([string]$Path) {
   Invoke-Proc $Py @('-m','pip','install','--no-deps','--force-reinstall',$Path) 900 | Out-Null
 }
 
-function Remove-Package([string]$PackageName) {
-  Invoke-Proc $Py @('-m','pip','uninstall','-y',$PackageName) 300 -AllowFailure | Out-Null
+function Remove-Package([string]$PackageName, [switch]$AllowFailure) {
+  if ($AllowFailure) { Invoke-Proc $Py @('-m','pip','uninstall','-y',$PackageName) 300 -AllowFailure | Out-Null }
+  else { Invoke-Proc $Py @('-m','pip','uninstall','-y',$PackageName) 300 | Out-Null }
 }
 
 function Recover([object]$EnvInfo, [object]$Plan) {
@@ -822,7 +824,7 @@ function Recover([object]$EnvInfo, [object]$Plan) {
   Write-LogLine 'RECOVERY START'
   try {
     $mutated = Get-MutatedPackages $Plan
-    foreach ($pkg in $mutated) { Remove-Package $pkg }
+    foreach ($pkg in $mutated) { Remove-Package $pkg -AllowFailure }
 
     $patterns = foreach ($pkg in $mutated) { Get-PackagePatterns $pkg }
     foreach ($pattern in @($patterns | Select-Object -Unique)) {

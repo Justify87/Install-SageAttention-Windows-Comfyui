@@ -53,7 +53,7 @@ PYPI_TRITON_JSON = "https://pypi.org/pypi/triton-windows/json"
 # Python *minor* version must match.
 PYDEV_RELEASE_API = "https://api.github.com/repos/woct0rdho/triton-windows/releases/tags/v3.0.0-windows.post1"
 
-SAGE3_RUNTIME_ARCHS = frozenset({"12.0", "12.1"})
+SAGE3_RUNTIME_ARCHS = frozenset({"10.0", "12.0", "12.1"})
 COMMUNITY_SAGE3_VERIFIED_ARCHS = frozenset({"12.0"})
 MANAGED_PACKAGES = ("triton", "triton-windows", "sageattention", "sageattn3")
 TORCH_READ_ONLY_PACKAGES = ("torch", "torchvision", "torchaudio")
@@ -1034,10 +1034,8 @@ def test_sage3_hardware(env: EnvironmentInfo) -> str | None:
         return "SageAttention 3 requires CUDA 12.8 or newer."
     if not version_at_least(env.torch, "2.8"):
         return "SageAttention 3 upstream requires PyTorch 2.8 or newer."
-    # Do not impose the upstream README's example/base-environment Python floor
-    # as a hard runtime block: the current Comfy-Org SA3 build matrix explicitly
-    # publishes Windows combinations for older supported CPython minors too. The
-    # resolver therefore lets actual wheel availability decide Python support.
+    if not version_at_least(env.python_mm, "3.13"):
+        return "SageAttention 3 upstream currently requires Python 3.13 or newer."
     return None
 
 
@@ -1633,10 +1631,16 @@ def install_wheel(py: Path, root: Path, wheel: Path) -> None:
     run_process(py, ["-s", "-B", "-m", "pip", *pip_args], cwd=root, timeout=900)
 
 
-def remove_package(py: Path, root: Path, package: str) -> None:
+def remove_package(py: Path, root: Path, package: str, *, allow_failure: bool = False) -> None:
     pip_args = ["uninstall", "-y", package]
     assert_safe_pip_mutation(pip_args)
-    run_process(py, ["-s", "-B", "-m", "pip", *pip_args], cwd=root, timeout=300, allow_failure=True)
+    run_process(
+        py,
+        ["-s", "-B", "-m", "pip", *pip_args],
+        cwd=root,
+        timeout=300,
+        allow_failure=allow_failure,
+    )
 
 
 def install_python_dev(root: Path, archive: Path, python_mm: str) -> None:
@@ -1693,7 +1697,7 @@ def recover(root: Path, py: Path, env: EnvironmentInfo, plan: InstallPlan, backu
     try:
         packages = mutated_packages(plan)
         for package in packages:
-            remove_package(py, root, package)
+            remove_package(py, root, package, allow_failure=True)
         site_packages = Path(env.site_packages)
         _remove_package_patterns(site_packages, packages)
 
@@ -1802,6 +1806,10 @@ def verify_install(root: Path, py: Path, before: EnvironmentInfo, plan: InstallP
         sage3 = run_process(py, ["-s", "-B", "-c", SAGE3_VERIFY], cwd=root, timeout=300)
         _show_child_output(sage3)
     after = get_environment_info(py, root)
+    if plan.legacy_triton == "REMOVE" and after.legacy_triton:
+        raise InstallerError(
+            f"Legacy triton is still installed after conflict removal ({after.legacy_triton})."
+        )
     if after.torch_snapshot() != before.torch_snapshot():
         raise InstallerError(
             "Safety check failed: a read-only Torch package version changed. "

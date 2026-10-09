@@ -103,15 +103,24 @@ class HardwareTests(unittest.TestCase):
             with self.subTest(cc=cc):
                 self.assertIsNone(installer.test_sage2_hardware(make_env(cc=cc, cuda=cuda)))
 
-    def test_sage3_python_support_is_resolver_driven(self):
-        # Current Comfy-Org SA3 wheels include multiple CPython minors, so Python
-        # compatibility is resolved from wheel/build metadata rather than a hard
-        # installer floor. Hardware/runtime requirements still apply.
-        self.assertIsNone(installer.test_sage3_hardware(make_env(cc="12.0", python_mm="3.12", torch="2.9.0", cuda="12.8")))
+    def test_sage3_upstream_python_floor(self):
+        self.assertIn(
+            "Python 3.13",
+            installer.test_sage3_hardware(make_env(cc="12.0", python_mm="3.12", torch="2.9.0", cuda="12.8")),
+        )
         self.assertIsNone(installer.test_sage3_hardware(make_env(cc="12.0", python_mm="3.13", torch="2.9.0", cuda="12.8")))
 
 
 class BackendEvaluationTests(unittest.TestCase):
+    def test_sage3_accepts_sm100_current_upstream(self):
+        env = make_env(cc="10.0", python_mm="3.13", torch="2.10.0+cu128", cuda="12.8")
+        self.assertIsNone(installer.test_sage3_hardware(env))
+
+    def test_sage3_rejects_python_below_313(self):
+        env = make_env(cc="12.0", python_mm="3.12", torch="2.10.0+cu128", cuda="12.8")
+        reason = installer.test_sage3_hardware(env)
+        self.assertIsNotNone(reason)
+        self.assertIn("Python 3.13", reason)
     def test_blackwell_without_matching_sage3_wheel_is_unavailable(self):
         env = make_env(cc="12.0", torch="2.10.0", cuda="12.8")
         result = installer.evaluate_sage3(
@@ -280,6 +289,21 @@ class MutationSafetyTests(unittest.TestCase):
             self.assertEqual(args[:2], ["-s", "-B"])
             self.assertNotIn("-S", args)
 
+
+    def test_legacy_triton_uninstall_is_strict_by_default(self):
+        calls = []
+        original = installer.run_process
+        try:
+            def fake_run_process(executable, args, **kwargs):
+                calls.append((list(args), kwargs.get("allow_failure")))
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            installer.run_process = fake_run_process
+            installer.remove_package(Path("python.exe"), Path("."), "triton")
+            self.assertEqual(calls[-1][1], False)
+            installer.remove_package(Path("python.exe"), Path("."), "triton", allow_failure=True)
+            self.assertEqual(calls[-1][1], True)
+        finally:
+            installer.run_process = original
 
 class FileSafetyTests(unittest.TestCase):
     def _write_wheel(self, path: Path, *, traversal=False):

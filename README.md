@@ -258,6 +258,8 @@ Priority:
 2. `wildminder/AI-windows-whl` / `sageattn3` as an explicit community fallback
 3. `thu-ml/SageAttention/sageattention3_blackwell` as upstream runtime/hardware ground truth
 
+Current upstream SA3 requirements enforced by the installers are **Python 3.13+**, **PyTorch 2.8+**, and **CUDA 12.8+**. The current upstream build code explicitly handles Blackwell `sm_100`, `sm_120`, and `sm_121`; actual Windows wheel architecture coverage is checked separately, so runtime support alone never makes a wheel eligible.
+
 The current SageAttention 3 implementation still uses Triton during preprocessing, so Sage3-only plans also resolve a compatible `triton-windows` path.
 
 Community fallback is always displayed in the installation plan before mutation.
@@ -536,6 +538,7 @@ Close ComfyUI completely and retry. The Python installer ignores its own PID but
 
 Possible reasons include:
 
+- current upstream runtime/version requirements are not met (currently Python 3.13+, PyTorch 2.8+, CUDA 12.8+)
 - current upstream runtime support does not include the exact compute capability
 - no official Comfy-Org wheel covers the detected Python/PyTorch/CUDA/architecture combination
 - the community fallback cannot prove a safe compatible wheel
