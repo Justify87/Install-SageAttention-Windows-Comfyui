@@ -1,0 +1,42 @@
+name: Publish v3.1 beta 2 once
+
+on:
+  push:
+    branches: [feature/python-installer]
+    paths:
+      - '.github/workflows/publish-v3.1-beta2-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish beta release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v3.1.0-beta.2 \
+            --repo "${{ github.repository }}" \
+            --target 75d695e0d5a6a8d609d2c4064670cef25e861a32 \
+            --title "Version 3.1 Beta 2" \
+            --prerelease \
+            --notes-file - <<'EOF'
+          ## Python installer + SageAttention 2/3 — Beta 2
+
+          This release is built from the merged `main` commit for PR #9.
+
+          ### Highlights
+          - Adds the Python installer and `Install-SageAttention-Python.bat` launcher alongside the existing PowerShell installer.
+          - Uses ComfyUI Portable's own `python_embeded\python.exe`; no separate Python install is required.
+          - Keeps the long-lived installer process standard-library-only; Torch, Triton and SageAttention probing/verification run in short-lived child processes.
+          - Supports **Auto**, **Sage2**, **Sage3**, and **Both** with Torch remaining read-only.
+          - Prefers Comfy-Org wheels with `wildminder/AI-windows-whl` as explicit community fallback.
+          - Enforces current SageAttention 3 upstream requirements: Python 3.13+, PyTorch 2.8+, CUDA 12.8+, with runtime recognition for Blackwell sm_100/sm_120/sm_121 and separate wheel architecture validation.
+          - Legacy `triton` conflict removal fails closed during installation; recovery remains best-effort.
+          - **32 Python unit tests** and the **PowerShell resolver/parity smoke test** passed during review.
+
+          ### Beta status
+          Real Windows/NVIDIA end-to-end validation is still limited, so the release remains a prerelease.
+          EOF
